@@ -1,10 +1,7 @@
 /*
-Cross-origin isolation for WebLLM local inference.
-*/
-/*
-  COEP credentialless lets the browser load cross-origin model resources
-  that do not provide CORP headers while keeping cross-origin isolation.
-*/
-/*
-  This file is intentionally comment-free in the deployed header syntax.
-*/
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: credentialless
+  Cross-Origin-Resource-Policy: cross-origin
+
+/index.html
+  Cache-Control: no-cache
