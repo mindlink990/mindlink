@@ -1,11 +1,11 @@
-import { CreateMLCEngine, type MLCEngine } from '@mlc-ai/web-llm';
+import { CreateMLCEngine, prebuiltAppConfig, type MLCEngine } from '@mlc-ai/web-llm';
 
 export type AIStatus = 'idle' | 'loading' | 'ready' | 'generating' | 'error';
 export interface AIModelInfo { id:string; name:string; sizeMb:number; contextLength:number; runtime:'webgpu'; installed:boolean; }
 export interface GenerationOptions { temperature?:number; maxTokens?:number; signal?:AbortSignal; }
 export interface LocalAIEngine { getStatus():AIStatus; getModel():AIModelInfo|null; isSupported():boolean; load(model:AIModelInfo, onProgress?: (progress:number, text?:string)=>void):Promise<void>; generate(prompt:string, options?:GenerationOptions):Promise<string>; unload():Promise<void>; }
 
-/** Real browser-local inference via WebLLM/WebGPU. No cloud inference. */
+/** Browser-local inference via WebLLM/WebGPU. Model weights are fetched once and cached locally. */
 export class BrowserLocalAI implements LocalAIEngine {
  private status:AIStatus='idle'; private model:AIModelInfo|null=null; private engine:MLCEngine|null=null;
  getStatus(){return this.status;} getModel(){return this.model;}
@@ -14,9 +14,15 @@ export class BrowserLocalAI implements LocalAIEngine {
   this.status='loading';
   if(!this.isSupported()){this.status='error';throw new Error('WebGPU is not available on this device/browser.');}
   try{
-   this.engine=await CreateMLCEngine(model.id,{initProgressCallback:(report:{progress?:number;text?:string})=>onProgress?.(report.progress??0,report.text)});
+   const configured = prebuiltAppConfig.model_list.some((entry) => entry.model_id === model.id);
+   if(!configured) throw new Error(`Model ${model.id} is not included in this WebLLM build.`);
+   onProgress?.(0.01,'Checking local model cache…');
+   this.engine=await CreateMLCEngine(model.id,{appConfig:prebuiltAppConfig,initProgressCallback:(report:{progress?:number;text?:string})=>onProgress?.(report.progress??0,report.text)});
    this.model=model;this.status='ready';onProgress?.(1,'Local model ready.');
-  }catch(e){this.status='error';this.engine=null;throw new Error(`Local model could not be loaded: ${e instanceof Error?e.message:String(e)}`);}
+  }catch(e){this.status='error';this.engine=null;
+   const reason=e instanceof Error?e.message:String(e);
+   throw new Error(`Local model could not be loaded: ${reason}. Check your internet connection for the first download, then retry. After the model is cached, inference can run offline.`);
+  }
  }
  async generate(prompt:string, options:GenerationOptions={}){
   if(!this.engine||this.status!=='ready')throw new Error('Local AI model is not ready.');
