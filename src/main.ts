@@ -16,11 +16,22 @@ function render() {
   document.querySelector<HTMLDivElement>('#app')!.innerHTML = `<div class="shell"><aside><div class="brand"><span>◈</span><b>MindMesh</b><small>AI Without the Internet.</small></div>${nav.map(([id, label]) => `<button class="nav ${screen === id ? 'active' : ''}" data-nav="${id}">${label}</button>`).join('')}</aside><main><header><div><strong>${screen[0].toUpperCase() + screen.slice(1)}</strong><span class="status">● Offline-first</span></div><span class="privacy">🔒 Private</span></header>${content}</main><nav class="bottom">${nav.map(([id, label]) => `<button class="nav ${screen === id ? 'active' : ''}" data-nav="${id}">${label}</button>`).join('')}</nav></div>`;
   document.querySelectorAll<HTMLElement>('[data-nav]').forEach(b => b.onclick = () => { screen = b.dataset.nav as Screen; render(); });
   document.querySelectorAll<HTMLElement>('#chat-form').forEach(f => f.addEventListener('submit', async e => {
-    e.preventDefault(); const input = document.querySelector<HTMLInputElement>('#prompt')!; const text = input.value.trim(); if (!text) return;
+    e.preventDefault();
+    const input = document.querySelector<HTMLInputElement>('#prompt'); const send = f.querySelector<HTMLButtonElement>('button');
+    const text = input?.value.trim() || ''; if (!text) return;
     const current = getMessages(); if (plan === 'free' && used >= limits.free.chats) { alert('Daily chat limit reached.'); return; }
-    current.push({ role: 'user', text }); save(current); render();
-    try { if (ai.getStatus() !== 'ready') throw new Error('Load the local model first.'); const answer = await ai.generate(text, { maxTokens: 384 }); const updated = getMessages(); updated.push({ role: 'assistant', text: answer || 'The local model returned an empty response.' }); save(updated); }
-    catch (error) { const updated = getMessages(); updated.push({ role: 'assistant', text: `Local AI unavailable: ${error instanceof Error ? error.message : 'unknown error'}` }); save(updated); }
+    current.push({ role: 'user', text }); save(current); if (input) input.value = ''; if (send) send.disabled = true; render();
+    try {
+      let answer: string;
+      if (ai.getStatus() === 'ready') {
+        answer = await ai.generate(text, { maxTokens: 384 });
+      } else {
+        answer = `MindMesh demo response: I received “${text}”. Your local AI model is not installed yet, so this is a local fallback response. Tap “Install & Load Local AI” above after the first model download succeeds.`;
+      }
+      const updated = getMessages(); updated.push({ role: 'assistant', text: answer || 'The local model returned an empty response.' }); save(updated);
+    } catch (error) {
+      const updated = getMessages(); updated.push({ role: 'assistant', text: `Local AI error: ${error instanceof Error ? error.message : 'unknown error'}\n\nYour message was saved locally. You can retry the model installation.` }); save(updated);
+    }
     render();
   }));
   document.querySelector('#load-model')?.addEventListener('click', async () => {
@@ -30,16 +41,18 @@ function render() {
   });
   document.querySelector('#diagnose-ai')?.addEventListener('click', async () => {
     diagnostics='Running diagnostics…'; render();
-    const d=await diagnoseLocalAI(model);
-    diagnostics=`Secure context: ${d.secureContext?'✓':'✗'} · WebGPU: ${d.webgpu?'✓':'✗'} · GPU adapter: ${d.adapter?'✓':'✗'} · Storage API: ${d.storage?'✓':'✗'} · Model config: ${d.modelConfigured?'✓':'✗'} · Model fetch: ${d.modelFetch}`;
-    if(d.notes.length) diagnostics += `\n${d.notes.join('\n')}`;
+    try {
+      const d=await diagnoseLocalAI(model);
+      diagnostics=`Secure context: ${d.secureContext?'✓':'✗'} · WebGPU: ${d.webgpu?'✓':'✗'} · GPU adapter: ${d.adapter?'✓':'✗'} · Storage API: ${d.storage?'✓':'✗'} · Model config: ${d.modelConfigured?'✓':'✗'} · Model fetch: ${d.modelFetch}`;
+      if(d.notes.length) diagnostics += `\n${d.notes.join('\n')}`;
+    } catch (error) { diagnostics = `Diagnostics failed: ${error instanceof Error ? error.message : 'unknown error'}`; }
     render();
   });
   document.querySelector('#clear')?.addEventListener('click', () => { localStorage.removeItem(key); render(); });
   document.querySelector('#upgrade')?.addEventListener('click', () => { plan = plan === 'free' ? 'pro' : 'free'; render(); });
 }
 function modelCard(ready: boolean) { const status = ai.getStatus(); const unsupported = !aiInfo.webgpu; return `<div class="card ai-model-card"><div class="model-head"><div><span class="pill">Local model</span><h3>${model.name}</h3><p>${model.sizeMb} MB · ${model.contextLength.toLocaleString()} context · WebGPU</p></div><strong>${status === 'ready' ? '✓ Ready' : status === 'loading' ? `${aiProgress}%` : 'Not installed'}</strong></div>${status === 'loading' ? `<div class="progress"><span style="width:${aiProgress}%"></span></div>` : ''}${unsupported ? '<p>⚠️ WebGPU is not available in this browser/device. Try a supported Chromium browser/device.</p>' : ready ? '<p class="ai-ready">✓ Model is running locally. Internet is not required for inference.</p>' : `<button id="load-model" class="primary" ${status === 'loading' ? 'disabled' : ''}>${status === 'error' ? 'Retry model install' : 'Install & Load Local AI'}</button><button id="diagnose-ai" class="ghost">🔎 Run AI diagnostics</button>`}${aiMessage ? `<p class="ai-status">${escapeHtml(aiMessage)}</p>` : ''}${diagnostics ? `<pre class="ai-diagnostics">${escapeHtml(diagnostics)}</pre>` : ''}</div>`; }
-function chat(m: { role: string; text: string }[], used: number) { const ready = ai.getStatus() === 'ready'; return `<section class="hero"><div class="orb">🧠</div><h1>Local intelligence.<br><em>Connected knowledge.</em></h1><p>MindMesh runs the AI model on your device. No cloud inference.</p></section>${modelCard(ready)}<div class="chat-card"><div class="messages">${m.length ? m.map(x => `<div class="msg ${x.role}"><b>${x.role === 'user' ? 'You' : 'MindMesh'}</b><p>${escapeHtml(x.text)}</p></div>`).join('') : '<div class="empty">Install the local model, then ask MindMesh anything.</div>'}</div><form id="chat-form"><input id="prompt" autocomplete="off" placeholder="Ask MindMesh…" ${ready ? '' : 'disabled'}><button ${ready ? '' : 'disabled'}>Send</button></form><div class="chat-meta">${used}/${plan === 'free' ? limits.free.chats : '∞'} chats used · local storage</div><div class="ai-status">Local AI: <strong>${ai.getStatus()}</strong> · ${model.name} · ${aiInfo.webgpu ? 'WebGPU detected' : 'WebGPU unavailable'}</div><button id="clear" class="ghost">Clear conversation</button></div>`; }
+function chat(m: { role: string; text: string }[], used: number) { const ready = ai.getStatus() === 'ready'; return `<section class="hero"><div class="orb">🧠</div><h1>Local intelligence.<br><em>Connected knowledge.</em></h1><p>MindMesh runs the AI model on your device. No cloud inference.</p></section>${modelCard(ready)}<div class="chat-card"><div class="messages">${m.length ? m.map(x => `<div class="msg ${x.role}"><b>${x.role === 'user' ? 'You' : 'MindMesh'}</b><p>${escapeHtml(x.text)}</p></div>`).join('') : '<div class="empty">Install the local model, then ask MindMesh anything. Chat also works in demo fallback mode before the model is installed.</div>'}</div><form id="chat-form"><input id="prompt" autocomplete="off" placeholder="Ask MindMesh…"><button type="submit">Send</button></form><div class="chat-meta">${used}/${plan === 'free' ? limits.free.chats : '∞'} chats used · local storage</div><div class="ai-status">Local AI: <strong>${ai.getStatus()}</strong> · ${model.name} · ${aiInfo.webgpu ? 'WebGPU detected' : 'WebGPU unavailable'}</div><button id="clear" class="ghost">Clear conversation</button></div>`; }
 function packages() { return `<section><div class="section-title"><div><h2>Knowledge Packages</h2><p>Local knowledge you can choose to share later.</p></div><button class="primary">＋ Add package</button></div><div class="grid"><article class="card"><span class="pill">Demo</span><h3>Programming Basics</h3><p>Offline programming concepts and examples.</p><small>12 MB · Private</small></article><article class="card"><span class="pill">Demo</span><h3>Urdu Knowledge</h3><p>General Urdu language and learning content.</p><small>8 MB · Private</small></article><article class="card muted"><h3>Package capacity</h3><p>${plan === 'free' ? '2 / 3' : '2 / Unlimited'} packages · 20 MB used</p></article></div></section>`; }
 function network() { return `<section><div class="hero compact"><div class="orb">📡</div><h1>AI Network</h1><p>Prototype only. Real Bluetooth, Wi‑Fi Direct and mesh routing are intentionally disabled.</p></div><div class="grid"><article class="card"><span class="online">● This device</span><h3>MindMesh-01</h3><p>Ready · encrypted sharing architecture reserved for future versions.</p></article><article class="card"><h3>Nearby nodes</h3><p>3 demo nodes</p><div class="nodes">●　●　●</div></article><article class="card"><h3>Privacy</h3><p>Nothing is shared automatically. User approval will be required.</p></article></div></section>`; }
 function profile(used: number) { return `<section><div class="profile-card"><div class="avatar">MM</div><h2>MindMesh ${plan === 'free' ? 'Free' : 'Pro'}</h2><p>${plan === 'free' ? 'Offline-first starter plan' : 'Prototype Pro mode'}</p><button id="upgrade" class="primary">${plan === 'free' ? 'Try Pro demo' : 'Switch to Free'}</button></div><div class="grid"><article class="card"><h3>Chats</h3><strong>${used}/${plan === 'free' ? 20 : '∞'}</strong></article><article class="card"><h3>Packages</h3><strong>2/${plan === 'free' ? 3 : '∞'}</strong></article><article class="card"><h3>Devices</h3><strong>1/${plan === 'free' ? 3 : 20}</strong></article></div></section>`; }
