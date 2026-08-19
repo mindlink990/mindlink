@@ -1,7 +1,5 @@
 /*
-	Cross-Origin-Opener-Policy: same-origin
-	Cross-Origin-Embedder-Policy: credentialless
-	Cross-Origin-Resource-Policy: cross-origin
-
-/index.html
-	Cache-Control: no-cache
+  Access-Control-Allow-Origin: *
+  Cross-Origin-Resource-Policy: cross-origin
+  Cross-Origin-Opener-Policy: same-origin-allow-popups
+  Cross-Origin-Embedder-Policy: unsafe-none
