@@ -6,7 +6,8 @@ export interface GenerationOptions { temperature?:number; maxTokens?:number; sig
 export interface LocalAIEngine { getStatus():AIStatus; getModel():AIModelInfo|null; isSupported():boolean; load(model:AIModelInfo, onProgress?: (progress:number, text?:string)=>void):Promise<void>; generate(prompt:string, options?:GenerationOptions):Promise<string>; unload():Promise<void>; }
 export interface AIDiagnostics { secureContext:boolean; crossOriginIsolated:boolean; webgpu:boolean; adapter:boolean; storage:boolean; modelConfigured:boolean; modelUrl?:string; modelFetch?:string; notes:string[]; }
 
-function configuredModel(id:string){ return prebuiltAppConfig.model_list.find((entry) => entry.model_id === id) as (Record<string,unknown>|undefined); }
+type WebLLMModelRecord = { model_id:string; model?:string; model_lib?:string; };
+function configuredModel(id:string){ return prebuiltAppConfig.model_list.find((entry) => entry.model_id === id) as WebLLMModelRecord|undefined; }
 
 /** Browser-local inference via WebLLM/WebGPU. Model weights are fetched once and cached locally. */
 export class BrowserLocalAI implements LocalAIEngine {
@@ -47,15 +48,24 @@ export async function diagnoseLocalAI(model:AIModelInfo):Promise<AIDiagnostics>{
  let adapter=false;
  if(webgpu){try{adapter=!!await (navigator as Navigator & {gpu:{requestAdapter:()=>Promise<unknown>}}).gpu.requestAdapter();}catch(e){notes.push(`WebGPU adapter request failed: ${e instanceof Error?e.message:String(e)}`);}}
  else notes.push('WebGPU API is unavailable.');
- if(!isolated) notes.push('Cross-origin isolation is disabled. MindMesh now sends COOP/COEP headers; reload after deployment.');
+ if(!isolated) notes.push('Cross-origin isolation is disabled. Refresh after the latest MindMesh deployment.');
  let storage=false;
  try{const estimate=await navigator.storage?.estimate();storage=!!estimate; if(estimate?.quota && estimate.quota < model.sizeMb*1024*1024*1.2) notes.push(`Browser storage quota may be too small for a ${model.sizeMb} MB model.`);}catch{notes.push('Browser storage estimate unavailable.');}
  const entry=configuredModel(model.id);
- const modelUrl=typeof entry?.model_url==='string'?entry.model_url:undefined;
+ // WebLLM calls this field `model` (the model repository URL), not `model_url`.
+ const modelUrl=typeof entry?.model==='string'?entry.model:undefined;
  let modelFetch='not tested';
- if(modelUrl){try{const response=await fetch(modelUrl,{method:'HEAD',cache:'no-store',mode:'cors'});modelFetch=`HTTP ${response.status}`;if(!response.ok)notes.push(`Model host returned HTTP ${response.status}.`);}catch(e){modelFetch='blocked/failed';notes.push(`Model host fetch failed: ${e instanceof Error?e.message:String(e)}`);}}
- else notes.push('WebLLM model URL could not be resolved from the installed model configuration.');
+ if(modelUrl){
+   try{
+     const response=await fetch(modelUrl,{method:'HEAD',cache:'no-store',mode:'cors'});
+     modelFetch=`HTTP ${response.status}`;
+     if(!response.ok)notes.push(`Model repository returned HTTP ${response.status}.`);
+   }catch(e){
+     modelFetch='blocked/failed';
+     notes.push(`Model repository fetch failed: ${e instanceof Error?e.message:String(e)}`);
+   }
+ } else notes.push('WebLLM model repository URL is missing from the installed model configuration.');
  if(!secureContext)notes.push('The page is not a secure context; WebGPU requires HTTPS or localhost.');
- if(webgpu&&adapter&&secureContext&&isolated&&modelFetch==='HTTP 200') notes.push('Browser, WebGPU adapter, isolation and model host look reachable.');
+ if(webgpu&&adapter&&secureContext&&isolated&&modelFetch==='HTTP 200') notes.push('Browser, WebGPU adapter, isolation and model repository look reachable.');
  return {secureContext,crossOriginIsolated:isolated,webgpu,adapter,storage,modelConfigured:!!entry,modelUrl,modelFetch,notes};
 }
