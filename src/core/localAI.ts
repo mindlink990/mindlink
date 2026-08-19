@@ -1,71 +1,32 @@
 export type AIStatus = 'idle' | 'loading' | 'ready' | 'generating' | 'error';
+export interface AIModelInfo { id: string; name: string; sizeMb: number; contextLength: number; runtime: 'webgpu' | 'wasm' | 'mock'; installed: boolean; }
+export interface GenerationOptions { temperature?: number; maxTokens?: number; signal?: AbortSignal; }
+export interface LocalAIEngine { getStatus(): AIStatus; getModel(): AIModelInfo | null; isSupported(): boolean; load(model: AIModelInfo, onProgress?: (progress: number, text?: string) => void): Promise<void>; generate(prompt: string, options?: GenerationOptions): Promise<string>; unload(): Promise<void>; }
 
-export interface AIModelInfo {
-  id: string;
-  name: string;
-  sizeMb: number;
-  contextLength: number;
-  runtime: 'webgpu' | 'wasm' | 'mock';
-  installed: boolean;
-}
-
-export interface GenerationOptions {
-  temperature?: number;
-  maxTokens?: number;
-  signal?: AbortSignal;
-}
-
-export interface LocalAIEngine {
-  getStatus(): AIStatus;
-  getModel(): AIModelInfo | null;
-  isSupported(): boolean;
-  load(model: AIModelInfo): Promise<void>;
-  generate(prompt: string, options?: GenerationOptions): Promise<string>;
-  unload(): Promise<void>;
-}
-
-/**
- * V2 browser runtime boundary. A real WebGPU/WebAssembly model adapter can be
- * plugged in without changing ChatManager or the UI. This adapter deliberately
- * fails instead of pretending that a mock response is a real local LLM.
- */
+/** Real browser-local inference through WebLLM. No cloud inference endpoint is used. */
 export class BrowserLocalAI implements LocalAIEngine {
-  private status: AIStatus = 'idle';
-  private model: AIModelInfo | null = null;
-
+  private status: AIStatus = 'idle'; private model: AIModelInfo | null = null; private engine: any = null;
   getStatus(): AIStatus { return this.status; }
   getModel(): AIModelInfo | null { return this.model; }
-  isSupported(): boolean {
-    return typeof window !== 'undefined' && 'gpu' in navigator;
-  }
-
-  async load(model: AIModelInfo): Promise<void> {
+  isSupported(): boolean { return typeof window !== 'undefined' && typeof navigator !== 'undefined' && 'gpu' in navigator; }
+  async load(model: AIModelInfo, onProgress?: (progress: number, text?: string) => void): Promise<void> {
     this.status = 'loading';
-    if (!this.isSupported()) {
-      this.status = 'error';
-      throw new Error('Local GPU inference is not available in this browser.');
-    }
-    if (!model.installed) {
-      this.status = 'error';
-      throw new Error('This model is not installed locally.');
-    }
-    // Runtime/model adapter integration point.
-    this.model = model;
-    this.status = 'ready';
+    try {
+      if (!this.isSupported()) throw new Error('WebGPU is not available in this browser.');
+      if (model.runtime !== 'webgpu') throw new Error('This model requires a WebGPU runtime.');
+      const webllm = await import('@mlc-ai/web-llm');
+      this.engine = await webllm.CreateMLCEngine(model.id, { initProgressCallback: (report: { progress?: number; text?: string }) => onProgress?.(report.progress ?? 0, report.text) });
+      this.model = { ...model, installed: true }; this.status = 'ready';
+    } catch (error) { this.engine = null; this.status = 'error'; throw error instanceof Error ? error : new Error('Unable to load the local model.'); }
   }
-
-  async generate(_prompt: string, _options: GenerationOptions = {}): Promise<string> {
-    if (this.status !== 'ready') throw new Error('Local AI model is not ready.');
-    throw new Error('No local model runtime is installed yet. Connect a WebGPU/WebAssembly model adapter.');
+  async generate(prompt: string, options: GenerationOptions = {}): Promise<string> {
+    if (!this.engine || this.status !== 'ready') throw new Error('Local AI model is not ready.');
+    this.status = 'generating';
+    try {
+      const response = await this.engine.chat.completions.create({ messages: [{ role: 'user', content: prompt }], temperature: options.temperature ?? 0.7, max_tokens: options.maxTokens ?? 512, stream: false });
+      return response.choices?.[0]?.message?.content ?? '';
+    } finally { this.status = 'ready'; }
   }
-
-  async unload(): Promise<void> {
-    this.model = null;
-    this.status = 'idle';
-  }
+  async unload(): Promise<void> { try { await this.engine?.unload?.(); } finally { this.engine = null; this.model = null; this.status = 'idle'; } }
 }
-
-export function getBrowserAIInfo() {
-  const webgpu = typeof navigator !== 'undefined' && 'gpu' in navigator;
-  return { webgpu, secureContext: typeof window !== 'undefined' ? window.isSecureContext : false };
-}
+export function getBrowserAIInfo() { const webgpu = typeof navigator !== 'undefined' && 'gpu' in navigator; return { webgpu, secureContext: typeof window !== 'undefined' ? window.isSecureContext : false }; }
