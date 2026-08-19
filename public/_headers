@@ -1,0 +1,12 @@
+/*
+  Cross-origin isolation is required by WebLLM for SharedArrayBuffer/WebWorker
+  local inference. Keep model files on their original CDN; these headers only
+  apply to MindMesh's own origin.
+  */
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: same-origin
+
+  /* Keep the HTML fresh so a new model/runtime fix is picked up immediately. */
+  /index.html
+    Cache-Control: no-cache
