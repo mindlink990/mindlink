@@ -34,7 +34,10 @@ export interface LocalAIEngine {
     model: AIModelInfo,
     onProgress?: (progress: number, text?: string) => void,
   ): Promise<void>;
-  generate(prompt: string, options?: GenerationOptions): Promise<string>;
+  generate(
+    prompt: string,
+    options?: GenerationOptions,
+  ): Promise<string>;
   unload(): Promise<void>;
 }
 
@@ -66,22 +69,25 @@ function configuredModel(
 
 /**
  * Browser-local inference via WebLLM/WebGPU.
- * Model weights are downloaded once and cached locally.
+ *
+ * Model weights are downloaded from the configured WebLLM
+ * Hugging Face repository on first install and then cached
+ * locally by WebLLM.
  */
 export class BrowserLocalAI implements LocalAIEngine {
   private status: AIStatus = 'idle';
   private model: AIModelInfo | null = null;
   private engine: MLCEngine | null = null;
 
-  getStatus() {
+  getStatus(): AIStatus {
     return this.status;
   }
 
-  getModel() {
+  getModel(): AIModelInfo | null {
     return this.model;
   }
 
-  isSupported() {
+  isSupported(): boolean {
     return (
       typeof navigator !== 'undefined' &&
       'gpu' in navigator
@@ -90,8 +96,11 @@ export class BrowserLocalAI implements LocalAIEngine {
 
   async load(
     model: AIModelInfo,
-    onProgress?: (progress: number, text?: string) => void,
-  ) {
+    onProgress?: (
+      progress: number,
+      text?: string,
+    ) => void,
+  ): Promise<void> {
     this.status = 'loading';
 
     if (!this.isSupported()) {
@@ -106,8 +115,11 @@ export class BrowserLocalAI implements LocalAIEngine {
       !crossOriginIsolated
     ) {
       this.status = 'error';
+
       throw new Error(
-        'Cross-origin isolation is disabled. Refresh the page after the latest deployment.',
+        'Local AI needs cross-origin isolation. ' +
+          'Refresh the page after the latest deployment. ' +
+          'Make sure COOP and COEP headers are enabled.',
       );
     }
 
@@ -120,11 +132,26 @@ export class BrowserLocalAI implements LocalAIEngine {
         );
       }
 
+      if (!entry.model) {
+        throw new Error(
+          `Model ${model.id} does not have a repository URL in WebLLM configuration.`,
+        );
+      }
+
       onProgress?.(
         0.01,
         'Checking local model cache…',
       );
 
+      /*
+       * CreateMLCEngine is responsible for:
+       *
+       * 1. Loading mlc-chat-config.json
+       * 2. Loading tokenizer files
+       * 3. Downloading model shards
+       * 4. Downloading the compatible WebGPU WASM library
+       * 5. Caching everything locally
+       */
       this.engine = await CreateMLCEngine(model.id, {
         appConfig: prebuiltAppConfig,
 
@@ -139,7 +166,11 @@ export class BrowserLocalAI implements LocalAIEngine {
         },
       });
 
-      this.model = model;
+      this.model = {
+        ...model,
+        installed: true,
+      };
+
       this.status = 'ready';
 
       onProgress?.(
@@ -157,8 +188,9 @@ export class BrowserLocalAI implements LocalAIEngine {
 
       throw new Error(
         `Local model could not be loaded: ${reason}. ` +
-        `The first installation requires internet access to the model files. ` +
-        `After successful caching, inference can run offline.`,
+          'The first installation requires internet access ' +
+          'and enough browser storage. After successful caching, ' +
+          'inference can run offline.',
       );
     }
   }
@@ -166,7 +198,7 @@ export class BrowserLocalAI implements LocalAIEngine {
   async generate(
     prompt: string,
     options: GenerationOptions = {},
-  ) {
+  ): Promise<string> {
     if (
       !this.engine ||
       this.status !== 'ready'
@@ -179,29 +211,38 @@ export class BrowserLocalAI implements LocalAIEngine {
     this.status = 'generating';
 
     try {
-      const response =
-        await this.engine.chat.completions.create({
-          messages: [
-            {
-              role: 'system',
-              content:
-                'You are MindMesh, a private offline assistant. Be concise and honest.',
-            },
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
+      const request: {
+        messages: Array<{
+          role: 'system' | 'user';
+          content: string;
+        }>;
+        temperature: number;
+        max_tokens: number;
+      } = {
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are MindMesh, a private offline assistant. Be concise, accurate and honest.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature:
+          options.temperature ?? 0.7,
+        max_tokens:
+          options.maxTokens ?? 512,
+      };
 
-          temperature:
-            options.temperature ?? 0.7,
-
-          max_tokens:
-            options.maxTokens ?? 512,
-        });
+      const result =
+        await this.engine.chat.completions.create(
+          request,
+        );
 
       return (
-        response.choices[0]?.message?.content ??
+        result.choices[0]?.message?.content ??
         ''
       );
     } finally {
@@ -209,7 +250,7 @@ export class BrowserLocalAI implements LocalAIEngine {
     }
   }
 
-  async unload() {
+  async unload(): Promise<void> {
     if (this.engine) {
       await this.engine.unload();
     }
@@ -237,6 +278,11 @@ export function getBrowserAIInfo() {
   };
 }
 
+/**
+ * Tests the actual WebLLM model configuration files
+ * instead of incorrectly testing the Hugging Face
+ * repository HTML page.
+ */
 export async function diagnoseLocalAI(
   model: AIModelInfo,
 ): Promise<AIDiagnostics> {
@@ -254,20 +300,28 @@ export async function diagnoseLocalAI(
 
   const notes: string[] = [];
 
+  /*
+   * WebGPU adapter test
+   */
   let adapter = false;
 
-  // -----------------------------
-  // WebGPU adapter
-  // -----------------------------
   if (webgpu) {
     try {
-      adapter = !!await (
+      const gpu = (
         navigator as Navigator & {
           gpu: {
             requestAdapter: () => Promise<unknown>;
           };
         }
-      ).gpu.requestAdapter();
+      ).gpu;
+
+      adapter = !!(await gpu.requestAdapter());
+
+      if (!adapter) {
+        notes.push(
+          'WebGPU is available but no GPU adapter was returned.',
+        );
+      }
     } catch (e) {
       notes.push(
         `WebGPU adapter request failed: ${
@@ -283,19 +337,19 @@ export async function diagnoseLocalAI(
     );
   }
 
-  // -----------------------------
-  // Cross-origin isolation
-  // -----------------------------
+  /*
+   * Cross-origin isolation
+   */
   if (!isolated) {
     notes.push(
       'Cross-origin isolation is disabled. ' +
-      'Refresh after the latest deployment.',
+        'The deployment must send COOP and COEP headers.',
     );
   }
 
-  // -----------------------------
-  // Browser storage
-  // -----------------------------
+  /*
+   * Browser storage
+   */
   let storage = false;
 
   try {
@@ -322,11 +376,10 @@ export async function diagnoseLocalAI(
     );
   }
 
-  // -----------------------------
-  // WebLLM model configuration
-  // -----------------------------
-  const entry =
-    configuredModel(model.id);
+  /*
+   * WebLLM model configuration
+   */
+  const entry = configuredModel(model.id);
 
   const modelUrl =
     typeof entry?.model === 'string'
@@ -336,18 +389,33 @@ export async function diagnoseLocalAI(
   let modelFetch =
     'not tested';
 
-  // -----------------------------
-  // Test model repository
-  // -----------------------------
-  if (modelUrl) {
+  if (!entry) {
+    notes.push(
+      `Model ${model.id} is missing from WebLLM prebuiltAppConfig.`,
+    );
+  }
+
+  if (!modelUrl) {
+    notes.push(
+      'WebLLM model repository URL is missing from the installed model configuration.',
+    );
+  } else {
+    /*
+     * IMPORTANT:
+     *
+     * Do NOT fetch the Hugging Face repository HTML page.
+     *
+     * Test the actual WebLLM configuration file.
+     */
+    const baseUrl =
+      modelUrl.replace(/\/+$/, '');
+
+    const configUrl =
+      `${baseUrl}/resolve/main/mlc-chat-config.json`;
+
     try {
-      /*
-       * Use GET instead of HEAD.
-       * Some model/CDN endpoints do not handle HEAD
-       * correctly even though normal model downloads work.
-       */
       const response = await fetch(
-        modelUrl,
+        configUrl,
         {
           method: 'GET',
           cache: 'no-store',
@@ -361,11 +429,11 @@ export async function diagnoseLocalAI(
 
       if (!response.ok) {
         notes.push(
-          `Model repository returned HTTP ${response.status}.`,
+          `mlc-chat-config.json returned HTTP ${response.status}.`,
         );
       } else {
         notes.push(
-          'Model repository is reachable from the browser.',
+          'mlc-chat-config.json is reachable from the browser.',
         );
       }
     } catch (e) {
@@ -380,24 +448,56 @@ export async function diagnoseLocalAI(
         }`,
       );
     }
-  } else {
-    notes.push(
-      'WebLLM model repository URL is missing from the installed model configuration.',
-    );
+
+    /*
+     * Test tokenizer configuration separately.
+     */
+    const tokenizerConfigUrl =
+      `${baseUrl}/resolve/main/tokenizer_config.json`;
+
+    try {
+      const response = await fetch(
+        tokenizerConfigUrl,
+        {
+          method: 'GET',
+          cache: 'no-store',
+          mode: 'cors',
+          redirect: 'follow',
+        },
+      );
+
+      if (!response.ok) {
+        notes.push(
+          `tokenizer_config.json returned HTTP ${response.status}.`,
+        );
+      } else {
+        notes.push(
+          'tokenizer_config.json is reachable from the browser.',
+        );
+      }
+    } catch (e) {
+      notes.push(
+        `Tokenizer config fetch failed: ${
+          e instanceof Error
+            ? e.message
+            : String(e)
+        }`,
+      );
+    }
   }
 
-  // -----------------------------
-  // Secure context
-  // -----------------------------
+  /*
+   * Secure context
+   */
   if (!secureContext) {
     notes.push(
       'The page is not a secure context. WebGPU requires HTTPS or localhost.',
     );
   }
 
-  // -----------------------------
-  // Final diagnostic
-  // -----------------------------
+  /*
+   * Final diagnostic
+   */
   if (
     webgpu &&
     adapter &&
@@ -406,7 +506,7 @@ export async function diagnoseLocalAI(
     modelFetch.startsWith('HTTP 2')
   ) {
     notes.push(
-      'Browser, WebGPU, isolation and model repository look reachable.',
+      'Browser, WebGPU, isolation and WebLLM model configuration look reachable.',
     );
   }
 
